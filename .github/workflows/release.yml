@@ -1,0 +1,328 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          pnpm pkg set version="$VERSION"
+
+      - name: Build app
+        env:
+          NODE_OPTIONS: '--max-old-space-size=8192'
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: quant-jump-pro
+          SENTRY_PROJECT: electron
+        run: pnpm build
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            --draft=false 2>/dev/null || echo "Release $TAG already exists, skipping creation"
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            out/renderer
+            dist-electron
+          retention-days: 1
+
+  release-mac:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+            dist_command: pnpm dist:mac:arm64
+          - arch: x64
+            runner: macos-15-intel
+            dist_command: pnpm dist:mac:x64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Python for node-gyp
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          pnpm pkg set version="$VERSION"
+
+      - name: Build app (macOS ${{ matrix.arch }})
+        env:
+          NODE_OPTIONS: '--max-old-space-size=8192'
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: quant-jump-pro
+          SENTRY_PROJECT: electron
+        run: pnpm build
+
+      - name: Verify packaged inputs (macOS ${{ matrix.arch }})
+        run: |
+          test -f dist-electron/main/index.cjs
+          test -f dist-electron/preload/index.js
+          test -f out/renderer/index.html
+          test -f mcp-server/dist/index.js
+
+      - name: Package (macOS ${{ matrix.arch }})
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: ${{ matrix.dist_command }} --publish never
+
+      - name: Upload assets to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for f in release/*.dmg release/*.zip release/*.blockmap release/*.yml; do
+            [ -f "$f" ] && gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber
+          done
+
+  release-win:
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Python for node-gyp
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          pnpm pkg set version="$VERSION"
+
+      - name: Build app (Windows)
+        env:
+          NODE_OPTIONS: '--max-old-space-size=8192'
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: quant-jump-pro
+          SENTRY_PROJECT: electron
+        run: pnpm build
+
+      - name: Verify packaged inputs (Windows)
+        shell: bash
+        run: |
+          test -f dist-electron/main/index.cjs
+          test -f dist-electron/preload/index.js
+          test -f out/renderer/index.html
+          test -f mcp-server/dist/index.js
+
+      - name: Package (Windows)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm dist:win --publish never
+
+      - name: Upload assets to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for f in release/*.exe release/*.blockmap release/*.yml; do
+            [ -f "$f" ] && gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber
+          done
+
+  release-linux:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Python for node-gyp
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools rpm
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          pnpm pkg set version="$VERSION"
+
+      - name: Build app (Linux)
+        env:
+          NODE_OPTIONS: '--max-old-space-size=8192'
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: quant-jump-pro
+          SENTRY_PROJECT: electron
+        run: pnpm build
+
+      - name: Verify packaged inputs (Linux)
+        run: |
+          test -f dist-electron/main/index.cjs
+          test -f dist-electron/preload/index.js
+          test -f out/renderer/index.html
+          test -f mcp-server/dist/index.js
+
+      - name: Package (Linux)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm dist:linux --publish never
+
+      - name: Upload assets to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for f in release/*.AppImage release/*.deb release/*.rpm release/*.pacman release/*.blockmap release/*.yml; do
+            [ -f "$f" ] && gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber
+          done
+
+  upload-stable-links:
+    needs: [release-mac, release-win, release-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Upload stable-named assets for /latest/download links
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          REPO="${GITHUB_REPOSITORY}"
+          DOWNLOAD_BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
+
+          declare -A FILES=(
+            ["Claude-Agent-Teams-UI-arm64.dmg"]="Claude.Agent.Teams.UI-${VERSION}-arm64.dmg"
+            ["Claude-Agent-Teams-UI-x64.dmg"]="Claude.Agent.Teams.UI-${VERSION}.dmg"
+            ["Claude-Agent-Teams-UI-Setup.exe"]="Claude.Agent.Teams.UI.Setup.${VERSION}.exe"
+            ["Claude-Agent-Teams-UI.AppImage"]="Claude.Agent.Teams.UI-${VERSION}.AppImage"
+            ["Claude-Agent-Teams-UI-amd64.deb"]="claude-agent-teams-ui_${VERSION}_amd64.deb"
+            ["Claude-Agent-Teams-UI-x86_64.rpm"]="claude-agent-teams-ui-${VERSION}.x86_64.rpm"
+            ["Claude-Agent-Teams-UI.pacman"]="claude-agent-teams-ui-${VERSION}.pacman"
+          )
+
+          # Remove old stable assets (ignore errors if they don't exist)
+          for STABLE_NAME in "${!FILES[@]}"; do
+            gh release delete-asset "v${VERSION}" "$STABLE_NAME" --repo "$REPO" --yes 2>/dev/null || true
+          done
+
+          # Download versioned files and re-upload with stable names
+          for STABLE_NAME in "${!FILES[@]}"; do
+            VERSIONED_NAME="${FILES[$STABLE_NAME]}"
+            echo "Downloading ${VERSIONED_NAME} -> ${STABLE_NAME}"
+            curl -fSL -o "$STABLE_NAME" "${DOWNLOAD_BASE}/${VERSIONED_NAME}" && \
+              gh release upload "v${VERSION}" "$STABLE_NAME" --repo "$REPO" --clobber
+            rm -f "$STABLE_NAME"
+          done
