@@ -15,6 +15,11 @@ WORKDIR /app
 # Enable corepack for pnpm
 RUN corepack enable
 
+# node-pty needs a native build toolchain during install
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first (better layer caching)
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
@@ -33,10 +38,11 @@ WORKDIR /app
 # Enable corepack for pnpm
 RUN corepack enable
 
-# Copy package files and install production-only dependencies
-# (fastify, @fastify/cors, @fastify/static are externalized from the bundle)
+# Reuse the builder's installed modules so native addons and lifecycle scripts
+# don't need to run again in the runtime image.
 COPY --from=builder /app/package.json /app/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/agent-teams-controller ./agent-teams-controller
 
 # Copy built standalone server and renderer output
 COPY --from=builder /app/dist-standalone ./dist-standalone

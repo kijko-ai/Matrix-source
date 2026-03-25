@@ -145,6 +145,33 @@ describe('teamSlice actions', () => {
   });
 
   describe('refreshTeamData provisioning safety', () => {
+    it('keeps the team in provisioning state when browser mode returns Team not found during initial select', async () => {
+      const store = createSliceStore();
+      store.setState({
+        provisioningRuns: {
+          'run-1': {
+            runId: 'run-1',
+            teamName: 'my-team',
+            state: 'spawning',
+            message: 'Starting',
+            startedAt: '2026-03-12T10:00:00.000Z',
+            updatedAt: '2026-03-12T10:00:01.000Z',
+          },
+        },
+        currentProvisioningRunIdByTeam: {
+          'my-team': 'run-1',
+        },
+      });
+      hoisted.getData.mockRejectedValue(new Error('Team not found: my-team'));
+
+      await store.getState().selectTeam('my-team');
+
+      expect(store.getState().selectedTeamName).toBe('my-team');
+      expect(store.getState().selectedTeamLoading).toBe(true);
+      expect(store.getState().selectedTeamError).toBeNull();
+      expect(store.getState().selectedTeamData).toBeNull();
+    });
+
     it('does not set fatal error on TEAM_PROVISIONING', async () => {
       const store = createSliceStore();
       // First, select a team so selectedTeamName is set

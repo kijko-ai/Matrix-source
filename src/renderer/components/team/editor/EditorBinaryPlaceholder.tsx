@@ -2,6 +2,7 @@
  * Placeholder for non-previewable binary files — shows file info and "Open in System Viewer" button.
  */
 
+import { api } from '@renderer/api';
 import { Button } from '@renderer/components/ui/button';
 import { useStore } from '@renderer/store';
 import { FileQuestion } from 'lucide-react';
@@ -26,7 +27,7 @@ export const EditorBinaryPlaceholder = ({
         : `${(size / 1024 / 1024).toFixed(1)} MB`;
 
   const handleOpenExternal = (): void => {
-    window.electronAPI.openPath(filePath, projectPath ?? undefined).catch(console.error);
+    api.openPath(filePath, projectPath ?? undefined).catch(console.error);
   };
 
   return (

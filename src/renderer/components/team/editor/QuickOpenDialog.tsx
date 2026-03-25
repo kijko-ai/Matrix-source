@@ -5,6 +5,7 @@
  * Loads ALL project files via backend API on mount (not limited to expanded dirs).
  */
 
+import { api } from '@renderer/api';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useStore } from '@renderer/store';
@@ -40,11 +41,17 @@ export const QuickOpenDialog = ({
   // Load all project files on mount via backend API
   useEffect(() => {
     let cancelled = false;
+    if (!projectPath) {
+      setLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional sync on prop change
     setLoading(true);
-    window.electronAPI.editor
-      .listFiles()
+    api.project
+      .listFiles(projectPath)
       .then((files) => {
         if (!cancelled) {
           setAllFiles(files);

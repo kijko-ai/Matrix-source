@@ -8,6 +8,7 @@
 
 import React, { useCallback, useRef, useState } from 'react';
 
+import { api } from '@renderer/api';
 import * as ContextMenu from '@radix-ui/react-context-menu';
 import { lastSeparatorIndex } from '@shared/utils/platformPath';
 import {
@@ -172,7 +173,7 @@ export const EditorContextMenu = ({
               <ContextMenu.Item
                 className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs text-text outline-none hover:bg-surface-raised focus:bg-surface-raised"
                 onSelect={() => {
-                  void window.electronAPI.showInFolder(target.path);
+                  void api.showInFolder(target.path);
                 }}
               >
                 <FolderOpen className="size-3.5 text-text-muted" />

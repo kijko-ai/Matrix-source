@@ -6,6 +6,7 @@
  * Folders are derived from file paths (no extra IPC call needed).
  */
 
+import { api } from '@renderer/api';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
@@ -187,7 +188,7 @@ export function useFileSuggestions(
     (projectRoot: string) => {
       let cancelled = false;
       setLoading(true);
-      window.electronAPI.project
+      api.project
         .listFiles(projectRoot)
         .then((files) => {
           if (cancelled) return;

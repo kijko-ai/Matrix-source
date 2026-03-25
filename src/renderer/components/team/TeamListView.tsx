@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { api, isElectronMode } from '@renderer/api';
+import { api } from '@renderer/api';
 import { confirm } from '@renderer/components/common/ConfirmDialog';
 import { Badge } from '@renderer/components/ui/badge';
 import { Button } from '@renderer/components/ui/button';
@@ -211,7 +211,6 @@ const StatusBadge = ({ status }: { status: TeamStatus }): React.JSX.Element => {
 
 export const TeamListView = (): React.JSX.Element => {
   const { isLight } = useTheme();
-  const electronMode = isElectronMode();
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [copyData, setCopyData] = useState<TeamCopyData | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -275,7 +274,7 @@ export const TeamListView = (): React.JSX.Element => {
       leadActivityByTeam: s.leadActivityByTeam,
     }))
   );
-  const canCreate = electronMode && connectionMode === 'local';
+  const canCreate = connectionMode === 'local';
   const provisioningState = useMemo(
     () => ({ currentProvisioningRunIdByTeam, provisioningRuns }),
     [currentProvisioningRunIdByTeam, provisioningRuns]
@@ -299,7 +298,6 @@ export const TeamListView = (): React.JSX.Element => {
 
   // Fetch alive teams on mount and when teams list changes
   useEffect(() => {
-    if (!electronMode) return;
     let cancelled = false;
     const fetchAlive = async (): Promise<void> => {
       try {
@@ -313,11 +311,11 @@ export const TeamListView = (): React.JSX.Element => {
     return () => {
       cancelled = true;
     };
-  }, [electronMode, teams]);
+  }, [teams]);
 
   // Refresh alive teams when opening the create dialog so conflict warning is accurate.
   useEffect(() => {
-    if (!electronMode || !showCreateDialog) return;
+    if (!showCreateDialog) return;
     let cancelled = false;
     void api.teams
       .aliveList()
@@ -328,7 +326,7 @@ export const TeamListView = (): React.JSX.Element => {
     return () => {
       cancelled = true;
     };
-  }, [electronMode, showCreateDialog]);
+  }, [showCreateDialog]);
 
   const currentProjectPath = useMemo(() => {
     if (viewMode === 'grouped') {
@@ -597,12 +595,9 @@ export const TeamListView = (): React.JSX.Element => {
   );
 
   useEffect(() => {
-    if (!electronMode) {
-      return;
-    }
     void fetchTeams();
     void fetchAllTasks();
-  }, [electronMode, fetchTeams, fetchAllTasks]);
+  }, [fetchTeams, fetchAllTasks]);
 
   const taskCountsByTeam = useMemo(() => buildTaskCountsByTeam(globalTasks), [globalTasks]);
 
@@ -628,21 +623,6 @@ export const TeamListView = (): React.JSX.Element => {
     },
     [createTeam]
   );
-
-  if (!electronMode) {
-    return (
-      <div className="flex size-full items-center justify-center p-6">
-        <div className="max-w-md text-center">
-          <p className="text-sm font-medium text-[var(--color-text)]">
-            Teams is only available in Electron mode
-          </p>
-          <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-            In browser mode, access to local `~/.claude/teams` directories is not available.
-          </p>
-        </div>
-      </div>
-    );
-  }
 
   const createDialogElement = (
     <CreateTeamDialog
@@ -692,9 +672,7 @@ export const TeamListView = (): React.JSX.Element => {
         </div>
       </div>
       {!canCreate ? (
-        <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-          Only available in local Electron mode.
-        </p>
+        <p className="mt-2 text-xs text-[var(--color-text-muted)]">Requires a local connection.</p>
       ) : null}
 
       {teamsWithProvisioning.length > 0 ? (

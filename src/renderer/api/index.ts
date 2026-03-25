@@ -20,16 +20,23 @@ import type { ElectronAPI } from '@shared/types/api';
  * Resolves the base URL for the HTTP API client.
  *
  * - Electron "server mode" (browser opened via ?port=XXXX): use explicit port on 127.0.0.1
- * - Standalone/Docker (page served by the same server): use window.location.origin
- *   to avoid cross-origin issues (localhost vs 127.0.0.1)
+ * - Standalone/Docker root mount: use window.location.origin
+ * - Reverse-proxied subpath mount (e.g. /swarm/app/): use origin + pathname
+ *   so API traffic stays inside the mounted app namespace
  */
+function getMountedBasePath(): string {
+  const pathname = window.location.pathname.replace(/\/index\.html$/, '');
+  const normalized = pathname.replace(/\/+$/, '');
+  return normalized === '' || normalized === '/' ? '' : normalized;
+}
+
 function getHttpBaseUrl(): string {
   const params = new URLSearchParams(window.location.search);
   const explicitPort = params.get('port');
   if (explicitPort) {
     return `http://127.0.0.1:${parseInt(explicitPort, 10)}`;
   }
-  return window.location.origin;
+  return `${window.location.origin}${getMountedBasePath()}`;
 }
 
 let httpClient: HttpAPIClient | null = null;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import { api } from '@renderer/api';
 import { FileIcon } from '@renderer/components/team/editor/FileIcon';
 import { isImageMime } from '@renderer/utils/attachmentUtils';
 import { Loader2 } from 'lucide-react';
@@ -35,7 +36,7 @@ export const AttachmentDisplay = ({
 
   useEffect(() => {
     let cancelled = false;
-    void window.electronAPI.teams
+    void api.teams
       .getAttachments(teamName, messageId)
       .then((data) => {
         if (!cancelled) setState({ loaded: data, loading: false, key: `${teamName}:${messageId}` });

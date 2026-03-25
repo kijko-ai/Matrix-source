@@ -24,7 +24,25 @@ import {
   getTodosBasePath,
   setClaudeBasePathOverride,
 } from './utils/pathDecoder';
-import { LocalFileSystemProvider, NotificationManager, ServiceContext } from './services';
+import {
+  ChangeExtractorService,
+  CrossTeamService,
+  FileContentResolver,
+  GitDiffFallback,
+  LocalFileSystemProvider,
+  MemberStatsComputer,
+  NotificationManager,
+  ReviewApplierService,
+  ServiceContext,
+  TeamBackupService,
+  TeamConfigReader,
+  TeamDataService,
+  TeamInboxWriter,
+  TeamMemberLogsFinder,
+  TaskBoundaryParser,
+  TeamProvisioningService,
+} from './services';
+import { FileSearchService, GitStatusService, ProjectFileService } from './services/editor';
 
 import type { HttpServices } from './http';
 import type { SshConnectionManager } from './services/infrastructure/SshConnectionManager';
@@ -85,6 +103,19 @@ const sshConnectionManagerStub = {
 let localContext: ServiceContext;
 let notificationManager: NotificationManager;
 let httpServer: HttpServer;
+let teamDataService: TeamDataService;
+let teamProvisioningService: TeamProvisioningService;
+let teamBackupService: TeamBackupService;
+let crossTeamService: CrossTeamService;
+let memberStatsComputer: MemberStatsComputer;
+let changeExtractor: ChangeExtractorService;
+let fileContentResolver: FileContentResolver;
+let reviewApplier: ReviewApplierService;
+let gitDiffFallback: GitDiffFallback;
+let projectFileService: ProjectFileService;
+let fileSearchService: FileSearchService;
+let gitStatusService: GitStatusService;
+let teamMemberLogsFinder: TeamMemberLogsFinder;
 
 // =============================================================================
 // Lifecycle
@@ -122,12 +153,58 @@ async function start(): Promise<void> {
   // Create HTTP server
   httpServer = new HttpServer();
 
+  // Browser parity depends on the same backend service graph Electron uses.
+  teamDataService = new TeamDataService();
+  teamProvisioningService = new TeamProvisioningService();
+  teamBackupService = new TeamBackupService();
+  teamMemberLogsFinder = new TeamMemberLogsFinder();
+  memberStatsComputer = new MemberStatsComputer(teamMemberLogsFinder);
+  const taskBoundaryParser = new TaskBoundaryParser();
+  changeExtractor = new ChangeExtractorService(teamMemberLogsFinder, taskBoundaryParser);
+  gitDiffFallback = new GitDiffFallback();
+  fileContentResolver = new FileContentResolver(teamMemberLogsFinder, gitDiffFallback);
+  reviewApplier = new ReviewApplierService();
+  projectFileService = new ProjectFileService();
+  fileSearchService = new FileSearchService();
+  gitStatusService = new GitStatusService();
+  crossTeamService = new CrossTeamService(
+    new TeamConfigReader(),
+    teamDataService,
+    new TeamInboxWriter(),
+    teamProvisioningService
+  );
+
+  teamProvisioningService.setCrossTeamSender((request) => crossTeamService.send(request));
+  teamProvisioningService.setControlApiBaseUrlResolver(async () =>
+    httpServer.isRunning() ? `http://127.0.0.1:${httpServer.getPort()}` : null
+  );
+  teamProvisioningService.setTeamChangeEmitter((event) => {
+    httpServer.broadcast('team-change', event);
+  });
+  teamProvisioningService.setToolApprovalEventEmitter((event) => {
+    httpServer.broadcast('team:toolApprovalEvent', event);
+  });
+
+  void teamDataService
+    .initializeTaskCommentNotificationState()
+    .catch((error: unknown) =>
+      logger.warn(`[Init] task comment notification init failed: ${String(error)}`)
+    );
+  void teamBackupService
+    .initialize()
+    .catch((error: unknown) =>
+      logger.warn(`[Init] TeamBackupService init failed: ${String(error)}`)
+    );
+
   // Wire file watcher events to SSE broadcast
   localContext.fileWatcher.on('file-change', (event: unknown) => {
     httpServer.broadcast('file-change', event);
   });
   localContext.fileWatcher.on('todo-change', (event: unknown) => {
     httpServer.broadcast('todo-change', event);
+  });
+  localContext.fileWatcher.on('team-change', (event: unknown) => {
+    httpServer.broadcast('team-change', event);
   });
 
   // Forward notification events to SSE
@@ -150,10 +227,33 @@ async function start(): Promise<void> {
     dataCache: localContext.dataCache,
     updaterService: updaterServiceStub,
     sshConnectionManager: sshConnectionManagerStub,
+    teamDataService,
+    teamProvisioningService,
+    teamMemberLogsFinder,
+    memberStatsComputer,
+    teamBackupService,
+    crossTeamService,
+    changeExtractor,
+    fileContentResolver,
+    gitDiffFallback,
+    reviewApplier,
+    projectFileService,
+    fileSearchService,
+    gitStatusService,
+    eventBroadcaster: (channel, data) => httpServer.broadcast(channel, data),
   };
 
   // No-op mode switch handler (no SSH in standalone)
   const modeSwitchHandler = async (): Promise<void> => {};
+
+  setTimeout(() => {
+    void teamProvisioningService
+      .warmup()
+      .catch((error: unknown) =>
+        logger.warn(`[Init] TeamProvisioningService warmup failed: ${String(error)}`)
+      );
+    teamDataService.startProcessHealthPolling();
+  }, 5000);
 
   // Start the server
   const port = await httpServer.start(services, modeSwitchHandler, PORT, HOST);

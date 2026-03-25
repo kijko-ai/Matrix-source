@@ -5,6 +5,7 @@
  * with checkerboard background for transparency, metadata, and lightbox on click.
  */
 
+import { api } from '@renderer/api';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ImageLightbox } from '@renderer/components/team/attachments/ImageLightbox';
@@ -46,7 +47,7 @@ export const EditorImagePreview = ({
   useEffect(() => {
     let cancelled = false;
 
-    window.electronAPI.editor
+    api.editor
       .readBinaryPreview(filePath)
       .then((result) => {
         if (cancelled) return;
@@ -73,7 +74,7 @@ export const EditorImagePreview = ({
   }, []);
 
   const handleOpenExternal = useCallback((): void => {
-    window.electronAPI.openPath(filePath, projectPath ?? undefined).catch(console.error);
+    api.openPath(filePath, projectPath ?? undefined).catch(console.error);
   }, [filePath, projectPath]);
 
   const sizeFormatted =

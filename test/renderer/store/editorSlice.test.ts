@@ -23,6 +23,9 @@ const mockEditorAPI = {
   createDir: vi.fn(),
   deleteFile: vi.fn(),
   moveFile: vi.fn(),
+  watchDir: vi.fn(),
+  setWatchedFiles: vi.fn(),
+  setWatchedDirs: vi.fn(),
 };
 
 vi.mock('@renderer/api', () => ({
@@ -37,6 +40,9 @@ vi.mock('@renderer/api', () => ({
       createDir: (...args: unknown[]) => mockEditorAPI.createDir(...args),
       deleteFile: (...args: unknown[]) => mockEditorAPI.deleteFile(...args),
       moveFile: (...args: unknown[]) => mockEditorAPI.moveFile(...args),
+      watchDir: (...args: unknown[]) => mockEditorAPI.watchDir(...args),
+      setWatchedFiles: (...args: unknown[]) => mockEditorAPI.setWatchedFiles(...args),
+      setWatchedDirs: (...args: unknown[]) => mockEditorAPI.setWatchedDirs(...args),
     },
     // Provide stubs for other API domains if needed
     getProjects: vi.fn(),
@@ -847,6 +853,44 @@ describe('editorSlice', () => {
       await store.getState().moveFileInTree(oldPath, LIB_DIR);
 
       expect(mockBridge.remapState).toHaveBeenCalledWith(oldPath, newPath);
+    });
+  });
+
+  describe('watcher sync', () => {
+    it('syncs watched files and directories through the browser API', async () => {
+      vi.useFakeTimers();
+      try {
+        const srcDir = makeEntry('src', 'directory', `${PROJECT_PATH}/src`);
+        store.setState({
+          editorProjectPath: PROJECT_PATH,
+          editorOpenTabs: [
+            { id: 'tab-1', filePath: `${PROJECT_PATH}/src/b.ts`, title: 'b.ts' } as never,
+            { id: 'tab-2', filePath: `${PROJECT_PATH}/src/a.ts`, title: 'a.ts' } as never,
+          ],
+          editorExpandedDirs: { [`${PROJECT_PATH}/src`]: true },
+          editorWatcherEnabled: false,
+          editorFileTree: [srcDir],
+        });
+
+        mockEditorAPI.watchDir.mockResolvedValue(undefined);
+        mockEditorAPI.setWatchedFiles.mockResolvedValue(undefined);
+        mockEditorAPI.setWatchedDirs.mockResolvedValue(undefined);
+
+        await store.getState().toggleWatcher(true);
+        await vi.runAllTimersAsync();
+
+        expect(mockEditorAPI.watchDir).toHaveBeenCalledWith(true);
+        expect(mockEditorAPI.setWatchedFiles).toHaveBeenCalledWith([
+          `${PROJECT_PATH}/src/a.ts`,
+          `${PROJECT_PATH}/src/b.ts`,
+        ]);
+        expect(mockEditorAPI.setWatchedDirs).toHaveBeenCalledWith([
+          PROJECT_PATH,
+          `${PROJECT_PATH}/src`,
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

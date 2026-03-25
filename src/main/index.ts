@@ -954,6 +954,9 @@ async function startHttpServer(
         updaterService,
         sshConnectionManager,
         teamProvisioningService,
+        teamDataService,
+        teamBackupService: teamBackupService ?? undefined,
+        eventBroadcaster: (channel, data) => httpServer.broadcast(channel, data),
       },
       modeSwitchHandler,
       config.httpServer?.port ?? 3456

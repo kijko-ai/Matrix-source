@@ -7,8 +7,13 @@
  */
 
 import type {
+  AddMemberRequest,
+  AddTaskCommentRequest,
+  AgentChangeSet,
   AppConfig,
   AttachmentFileData,
+  ApplyReviewRequest,
+  ApplyReviewResult,
   ClaudeMdFileInfo,
   ClaudeRootFolderSelection,
   ClaudeRootInfo,
@@ -20,10 +25,19 @@ import type {
   CrossTeamAPI,
   ElectronAPI,
   FileChangeEvent,
+  FileChangeWithContent,
+  ConflictCheckResult,
   GlobalTask,
+  HunkDecision,
   HttpServerAPI,
   HttpServerStatus,
   KanbanColumnId,
+  ChangeStats,
+  LeadActivitySnapshot,
+  LeadContextUsageSnapshot,
+  MemberFullStats,
+  MemberLogSummary,
+  MemberSpawnStatusesSnapshot,
   NotificationsAPI,
   NotificationTrigger,
   PaginatedSessionsResult,
@@ -58,18 +72,30 @@ import type {
   TeamProvisioningPrepareResult,
   TeamProvisioningProgress,
   TeamsAPI,
+  TeamUpdateConfigRequest,
   TeamSummary,
   TeamTask,
   TeamTaskStatus,
+  TaskAttachmentMeta,
+  TaskComment,
   TriggerTestResult,
   UpdateKanbanPatch,
+  ReplaceMembersRequest,
+  ToolApprovalEvent,
+  ToolApprovalFileContent,
+  ToolApprovalSettings,
+  TeamCreateConfigRequest,
+  TeamMessageNotificationData,
   UpdaterAPI,
+  RejectResult,
   WaterfallData,
   WslClaudeRootCandidate,
+  TaskChangeSetV2,
 } from '@shared/types';
 import type { AgentConfig } from '@shared/types/api';
-import type { EditorAPI, ProjectAPI } from '@shared/types/editor';
+import type { EditorAPI, EditorFileChangeEvent, ProjectAPI } from '@shared/types/editor';
 import type { TerminalAPI } from '@shared/types/terminal';
+import type { CliArgsValidationResult } from '@shared/utils/cliArgsParser';
 
 export class HttpAPIClient implements ElectronAPI {
   private baseUrl: string;
@@ -87,6 +113,11 @@ export class HttpAPIClient implements ElectronAPI {
   // ---------------------------------------------------------------------------
 
   private initEventSource(): void {
+    if (typeof EventSource === 'undefined') {
+      console.warn('[HttpAPIClient] EventSource not available; realtime updates disabled');
+      this.eventSource = null;
+      return;
+    }
     this.eventSource = new EventSource(`${this.baseUrl}/api/events`);
     this.eventSource.onopen = () => console.log('[HttpAPIClient] SSE connected');
     this.eventSource.onerror = () => {
@@ -137,69 +168,68 @@ export class HttpAPIClient implements ElectronAPI {
   private async parseJson<T>(res: Response): Promise<T> {
     const text = await res.text();
     if (!res.ok) {
-      const parsed = JSON.parse(text) as { error?: string };
-      throw new Error(parsed.error ?? `HTTP ${res.status}`);
+      try {
+        const parsed = JSON.parse(text) as { error?: string };
+        throw new Error(parsed.error ?? `HTTP ${res.status}`);
+      } catch {
+        throw new Error(text || `HTTP ${res.status}`);
+      }
     }
+    if (!text) return undefined as T;
     return JSON.parse(text, (key, value) => HttpAPIClient.reviveDates(key, value)) as T;
   }
 
-  private async get<T>(path: string): Promise<T> {
+  private async request<T>(
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+    path: string,
+    body?: unknown
+  ): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
     try {
-      const res = await fetch(`${this.baseUrl}${path}`, { signal: controller.signal });
+      const init: RequestInit = {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+      };
+      if (body !== undefined) {
+        init.body = JSON.stringify(body);
+      }
+      const res = await fetch(`${this.baseUrl}${path}`, init);
       return this.parseJson<T>(res);
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  private async post<T>(path: string, body?: unknown): Promise<T> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10_000);
-    try {
-      const res = await fetch(`${this.baseUrl}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-      return this.parseJson<T>(res);
-    } finally {
-      clearTimeout(timeout);
-    }
+  private get<T>(path: string): Promise<T> {
+    return this.request('GET', path);
   }
 
-  private async del<T>(path: string, body?: unknown): Promise<T> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10_000);
-    try {
-      const res = await fetch(`${this.baseUrl}${path}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-      return this.parseJson<T>(res);
-    } finally {
-      clearTimeout(timeout);
-    }
+  private post<T>(path: string, body?: unknown): Promise<T> {
+    return this.request('POST', path, body);
   }
 
-  private async put<T>(path: string, body?: unknown): Promise<T> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10_000);
-    try {
-      const res = await fetch(`${this.baseUrl}${path}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-      return this.parseJson<T>(res);
-    } finally {
-      clearTimeout(timeout);
+  private put<T>(path: string, body?: unknown): Promise<T> {
+    return this.request('PUT', path, body);
+  }
+
+  private patch<T>(path: string, body?: unknown): Promise<T> {
+    return this.request('PATCH', path, body);
+  }
+
+  private del<T>(path: string, body?: unknown): Promise<T> {
+    return this.request('DELETE', path, body);
+  }
+
+  private buildQuery(params: Record<string, string | number | boolean | undefined | null>): string {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === '') continue;
+      query.set(key, String(value));
     }
+    const qs = query.toString();
+    return qs ? `?${qs}` : '';
   }
 
   // ---------------------------------------------------------------------------
@@ -661,297 +691,335 @@ export class HttpAPIClient implements ElectronAPI {
   };
 
   teams: TeamsAPI = {
-    list: async (): Promise<TeamSummary[]> => {
-      console.warn('[HttpAPIClient] teams API is not available in browser mode');
-      return [];
+    list: (): Promise<TeamSummary[]> => this.get<TeamSummary[]>('/api/teams'),
+    getData: async (teamName: string): Promise<TeamData> => {
+      const encodedTeamName = encodeURIComponent(teamName);
+      const data = await this.get<TeamData>(`/api/teams/${encodedTeamName}`);
+      if (typeof data.isAlive === 'boolean') {
+        return data;
+      }
+
+      try {
+        const isAlive = await this.get<boolean>(`/api/teams/${encodedTeamName}/process/alive`);
+        return {
+          ...data,
+          isAlive,
+        };
+      } catch {
+        return {
+          ...data,
+          isAlive: false,
+        };
+      }
     },
-    getData: async (_teamName: string): Promise<TeamData> => {
-      throw new Error('Teams detail is not available in browser mode');
+    getClaudeLogs: (
+      teamName: string,
+      query?: TeamClaudeLogsQuery
+    ): Promise<TeamClaudeLogsResponse> =>
+      this.get<TeamClaudeLogsResponse>(
+        `/api/teams/${encodeURIComponent(teamName)}/logs${this.buildQuery({
+          offset: query?.offset,
+          limit: query?.limit,
+        })}`
+      ),
+    deleteTeam: (teamName: string): Promise<void> =>
+      this.del(`/api/teams/${encodeURIComponent(teamName)}`),
+    restoreTeam: (teamName: string): Promise<void> =>
+      this.post(`/api/teams/${encodeURIComponent(teamName)}/restore`),
+    permanentlyDeleteTeam: (teamName: string): Promise<void> =>
+      this.del(`/api/teams/${encodeURIComponent(teamName)}/permanent`),
+    getSavedRequest: async (teamName: string): Promise<TeamCreateRequest | null> =>
+      this.get<TeamCreateRequest | null>(
+        `/api/teams/${encodeURIComponent(teamName)}/saved-request`
+      ),
+    deleteDraft: (teamName: string): Promise<void> =>
+      this.del(`/api/teams/${encodeURIComponent(teamName)}/draft`),
+    prepareProvisioning: (cwd?: string): Promise<TeamProvisioningPrepareResult> =>
+      this.post('/api/teams/prepare-provisioning', { cwd }),
+    createTeam: (request: TeamCreateRequest): Promise<TeamCreateResponse> =>
+      this.post<TeamCreateResponse>('/api/teams', request),
+    getProvisioningStatus: (runId: string): Promise<TeamProvisioningProgress> =>
+      this.get<TeamProvisioningProgress>(`/api/teams/provisioning/${encodeURIComponent(runId)}`),
+    cancelProvisioning: (runId: string): Promise<void> =>
+      this.post(`/api/teams/provisioning/${encodeURIComponent(runId)}/cancel`),
+    sendMessage: (teamName: string, request: SendMessageRequest): Promise<SendMessageResult> =>
+      this.post<SendMessageResult>(
+        `/api/teams/${encodeURIComponent(teamName)}/send-message`,
+        request
+      ),
+    createTask: (teamName: string, request: CreateTaskRequest): Promise<TeamTask> =>
+      this.post<TeamTask>(`/api/teams/${encodeURIComponent(teamName)}/tasks`, request),
+    requestReview: (teamName: string, taskId: string): Promise<void> =>
+      this.post(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/request-review`
+      ),
+    updateKanban: (teamName: string, taskId: string, patch: UpdateKanbanPatch): Promise<void> =>
+      this.patch(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/kanban`,
+        patch
+      ),
+    updateKanbanColumnOrder: (
+      teamName: string,
+      columnId: KanbanColumnId,
+      orderedTaskIds: string[]
+    ): Promise<void> =>
+      this.patch(
+        `/api/teams/${encodeURIComponent(teamName)}/kanban/${encodeURIComponent(columnId)}/order`,
+        {
+          orderedTaskIds,
+        }
+      ),
+    updateTaskStatus: (teamName: string, taskId: string, status: TeamTaskStatus): Promise<void> =>
+      this.patch(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/status`,
+        { status }
+      ),
+    updateTaskOwner: (teamName: string, taskId: string, owner: string | null): Promise<void> =>
+      this.patch(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/owner`,
+        { owner }
+      ),
+    updateTaskFields: (
+      teamName: string,
+      taskId: string,
+      fields: { subject?: string; description?: string }
+    ): Promise<void> =>
+      this.patch(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/fields`,
+        fields
+      ),
+    startTask: (teamName: string, taskId: string): Promise<{ notifiedOwner: boolean }> =>
+      this.post(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/start`
+      ),
+    processSend: (teamName: string, message: string): Promise<void> =>
+      this.post(`/api/teams/${encodeURIComponent(teamName)}/process/send`, { message }),
+    processAlive: (teamName: string): Promise<boolean> =>
+      this.get<boolean>(`/api/teams/${encodeURIComponent(teamName)}/process/alive`),
+    aliveList: (): Promise<string[]> => this.get<string[]>('/api/teams/alive-list'),
+    stop: (teamName: string): Promise<void> =>
+      this.post(`/api/teams/${encodeURIComponent(teamName)}/stop`),
+    createConfig: (request: TeamCreateConfigRequest): Promise<void> =>
+      this.post('/api/teams/create-config', request),
+    getMemberLogs: (teamName: string, memberName: string): Promise<MemberLogSummary[]> =>
+      this.get<MemberLogSummary[]>(
+        `/api/teams/${encodeURIComponent(teamName)}/member-logs/${encodeURIComponent(memberName)}`
+      ),
+    getLogsForTask: (
+      teamName: string,
+      taskId: string,
+      options?: {
+        owner?: string;
+        status?: string;
+        intervals?: { startedAt: string; completedAt?: string }[];
+        since?: string;
+      }
+    ): Promise<MemberLogSummary[]> =>
+      this.get<MemberLogSummary[]>(
+        `/api/teams/${encodeURIComponent(teamName)}/logs-for-task/${encodeURIComponent(taskId)}${this.buildQuery(
+          {
+            owner: options?.owner,
+            status: options?.status,
+            since: options?.since,
+            intervals: options?.intervals ? JSON.stringify(options.intervals) : undefined,
+          }
+        )}`
+      ),
+    getMemberStats: (teamName: string, memberName: string): Promise<MemberFullStats> =>
+      this.get<MemberFullStats>(
+        `/api/teams/${encodeURIComponent(teamName)}/member-stats/${encodeURIComponent(memberName)}`
+      ),
+    launchTeam: (request: TeamLaunchRequest): Promise<TeamLaunchResponse> =>
+      this.post<TeamLaunchResponse>(
+        `/api/teams/${encodeURIComponent(request.teamName)}/launch`,
+        request
+      ),
+    getAllTasks: (): Promise<GlobalTask[]> => this.get<GlobalTask[]>('/api/teams/all-tasks'),
+    updateConfig: (
+      teamName: string,
+      updates: TeamUpdateConfigRequest
+    ): Promise<TeamData['config']> =>
+      this.patch<TeamData['config']>(`/api/teams/${encodeURIComponent(teamName)}/config`, updates),
+    addMember: (teamName: string, request: AddMemberRequest): Promise<void> =>
+      this.post(`/api/teams/${encodeURIComponent(teamName)}/members`, request),
+    replaceMembers: (teamName: string, request: ReplaceMembersRequest): Promise<void> =>
+      this.put(`/api/teams/${encodeURIComponent(teamName)}/members`, request),
+    removeMember: (teamName: string, memberName: string): Promise<void> =>
+      this.del(
+        `/api/teams/${encodeURIComponent(teamName)}/members/${encodeURIComponent(memberName)}`
+      ),
+    updateMemberRole: (
+      teamName: string,
+      memberName: string,
+      role: string | undefined
+    ): Promise<void> =>
+      this.patch(
+        `/api/teams/${encodeURIComponent(teamName)}/members/${encodeURIComponent(memberName)}/role`,
+        { role }
+      ),
+    addTaskComment: (
+      teamName: string,
+      taskId: string,
+      request: AddTaskCommentRequest
+    ): Promise<TaskComment> =>
+      this.post<TaskComment>(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/comments`,
+        request
+      ),
+    setTaskClarification: (
+      teamName: string,
+      taskId: string,
+      value: 'lead' | 'user' | null
+    ): Promise<void> =>
+      this.patch(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/clarification`,
+        { value }
+      ),
+    getProjectBranch: (projectPath: string): Promise<string | null> =>
+      this.get<string | null>(`/api/teams/project-branch${this.buildQuery({ projectPath })}`),
+    getAttachments: (teamName: string, messageId: string): Promise<AttachmentFileData[]> =>
+      this.get<AttachmentFileData[]>(
+        `/api/teams/${encodeURIComponent(teamName)}/attachments/${encodeURIComponent(messageId)}`
+      ),
+    killProcess: (teamName: string, pid: number): Promise<void> =>
+      this.post(
+        `/api/teams/${encodeURIComponent(teamName)}/process/${encodeURIComponent(pid)}/kill`
+      ),
+    getLeadActivity: (teamName: string): Promise<LeadActivitySnapshot> =>
+      this.get<LeadActivitySnapshot>(`/api/teams/${encodeURIComponent(teamName)}/lead-activity`),
+    getLeadContext: (teamName: string): Promise<LeadContextUsageSnapshot> =>
+      this.get<LeadContextUsageSnapshot>(`/api/teams/${encodeURIComponent(teamName)}/lead-context`),
+    getMemberSpawnStatuses: (teamName: string): Promise<MemberSpawnStatusesSnapshot> =>
+      this.get<MemberSpawnStatusesSnapshot>(
+        `/api/teams/${encodeURIComponent(teamName)}/member-spawn-statuses`
+      ),
+    softDeleteTask: (teamName: string, taskId: string): Promise<void> =>
+      this.post(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/soft-delete`
+      ),
+    restoreTask: (teamName: string, taskId: string): Promise<void> =>
+      this.post(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/restore`
+      ),
+    getDeletedTasks: (teamName: string): Promise<TeamTask[]> =>
+      this.get<TeamTask[]>(`/api/teams/${encodeURIComponent(teamName)}/tasks/deleted`),
+    showMessageNotification: async (data) => {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        new Notification(data.summary ?? data.teamDisplayName ?? 'Message notification', {
+          body: data.body ?? '',
+        });
+        return;
+      }
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        void Notification.requestPermission().catch(() => undefined);
+      }
     },
-    getClaudeLogs: async (
-      _teamName: string,
-      _query?: TeamClaudeLogsQuery
-    ): Promise<TeamClaudeLogsResponse> => {
-      console.warn('[HttpAPIClient] getClaudeLogs is not available in browser mode');
-      return { lines: [], total: 0, hasMore: false };
-    },
-    deleteTeam: async (_teamName: string): Promise<void> => {
-      throw new Error('Team deletion is not available in browser mode');
-    },
-    restoreTeam: async (_teamName: string): Promise<void> => {
-      throw new Error('Team restore is not available in browser mode');
-    },
-    permanentlyDeleteTeam: async (_teamName: string): Promise<void> => {
-      throw new Error('Permanent team deletion is not available in browser mode');
-    },
-    getSavedRequest: async (_teamName: string): Promise<TeamCreateRequest | null> => {
-      console.warn('[HttpAPIClient] getSavedRequest is not available in browser mode');
-      return null;
-    },
-    deleteDraft: async (_teamName: string): Promise<void> => {
-      throw new Error('Draft team deletion is not available in browser mode');
-    },
-    prepareProvisioning: async (_cwd?: string): Promise<TeamProvisioningPrepareResult> => {
-      throw new Error('Team provisioning is not available in browser mode');
-    },
-    createTeam: async (_request: TeamCreateRequest): Promise<TeamCreateResponse> => {
-      throw new Error('Team provisioning is not available in browser mode');
-    },
-    launchTeam: async (_request: TeamLaunchRequest): Promise<TeamLaunchResponse> => {
-      throw new Error('Team launch is not available in browser mode');
-    },
-    getProvisioningStatus: async (_runId: string): Promise<TeamProvisioningProgress> => {
-      throw new Error('Team provisioning is not available in browser mode');
-    },
-    cancelProvisioning: async (_runId: string): Promise<void> => {
-      throw new Error('Team provisioning is not available in browser mode');
-    },
-    sendMessage: async (
-      _teamName: string,
-      _request: SendMessageRequest
-    ): Promise<SendMessageResult> => {
-      throw new Error('Team messaging is not available in browser mode');
-    },
-    createTask: async (_teamName: string, _request: CreateTaskRequest): Promise<TeamTask> => {
-      throw new Error('Team task creation is not available in browser mode');
-    },
-    requestReview: async (_teamName: string, _taskId: string): Promise<void> => {
-      throw new Error('Team review is not available in browser mode');
-    },
-    updateKanban: async (
-      _teamName: string,
-      _taskId: string,
-      _patch: UpdateKanbanPatch
-    ): Promise<void> => {
-      throw new Error('Team kanban is not available in browser mode');
-    },
-    updateKanbanColumnOrder: async (
-      _teamName: string,
-      _columnId: KanbanColumnId,
-      _orderedTaskIds: string[]
-    ): Promise<void> => {
-      throw new Error('Team kanban column order is not available in browser mode');
-    },
-    updateTaskStatus: async (
-      _teamName: string,
-      _taskId: string,
-      _status: TeamTaskStatus
-    ): Promise<void> => {
-      throw new Error('Team task status update is not available in browser mode');
-    },
-    updateTaskOwner: async (
-      _teamName: string,
-      _taskId: string,
-      _owner: string | null
-    ): Promise<void> => {
-      throw new Error('Team task owner update is not available in browser mode');
-    },
-    updateTaskFields: async (
-      _teamName: string,
-      _taskId: string,
-      _fields: { subject?: string; description?: string }
-    ): Promise<void> => {
-      throw new Error('Team task fields update is not available in browser mode');
-    },
-    startTask: async (_teamName: string, _taskId: string): Promise<{ notifiedOwner: boolean }> => {
-      throw new Error('Team start task is not available in browser mode');
-    },
-    processSend: async (_teamName: string, _message: string): Promise<void> => {
-      throw new Error('Team process communication is not available in browser mode');
-    },
-    processAlive: async (_teamName: string): Promise<boolean> => {
-      return false;
-    },
-    aliveList: async (): Promise<string[]> => {
-      return [];
-    },
-    stop: async (): Promise<void> => {
-      throw new Error('Team stop is not available in browser mode');
-    },
-    createConfig: async (): Promise<void> => {
-      throw new Error('Team config creation is not available in browser mode');
-    },
-    getMemberLogs: async () => {
-      console.warn('[HttpAPIClient] getMemberLogs is not available in browser mode');
-      return [];
-    },
-    getLogsForTask: async () => {
-      return [];
-    },
-    getMemberStats: async () => {
-      console.warn('[HttpAPIClient] getMemberStats is not available in browser mode');
-      return {
-        linesAdded: 0,
-        linesRemoved: 0,
-        filesTouched: [],
-        fileStats: {},
-        toolUsage: {},
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        costUsd: 0,
-        tasksCompleted: 0,
-        messageCount: 0,
-        totalDurationMs: 0,
-        sessionCount: 0,
-        computedAt: new Date().toISOString(),
-      };
-    },
-    getAllTasks: async (): Promise<GlobalTask[]> => {
-      console.warn('[HttpAPIClient] getAllTasks is not available in browser mode');
-      return [];
-    },
-    updateConfig: async () => {
-      throw new Error('Team config update is not available in browser mode');
-    },
-    addTaskComment: async () => {
-      throw new Error('Task comments are not available in browser mode');
-    },
-    addMember: async (): Promise<void> => {
-      throw new Error('Team member management is not available in browser mode');
-    },
-    replaceMembers: async (): Promise<void> => {
-      throw new Error('Team member management is not available in browser mode');
-    },
-    removeMember: async (): Promise<void> => {
-      throw new Error('Team member management is not available in browser mode');
-    },
-    updateMemberRole: async (): Promise<void> => {
-      throw new Error('Team member management is not available in browser mode');
-    },
-    getProjectBranch: async (_projectPath: string): Promise<string | null> => {
-      return null;
-    },
-    getAttachments: async (
-      _teamName: string,
-      _messageId: string
-    ): Promise<AttachmentFileData[]> => {
-      return [];
-    },
-    killProcess: async (_teamName: string, _pid: number): Promise<void> => {
-      // Not available via HTTP client — no-op
-    },
-    getLeadActivity: async (_teamName: string) => {
-      return { state: 'offline' as const, runId: null };
-    },
-    getLeadContext: async () => {
-      return { usage: null, runId: null };
-    },
-    getMemberSpawnStatuses: async () => {
-      return { statuses: {}, runId: null };
-    },
-    softDeleteTask: async (_teamName: string, _taskId: string): Promise<void> => {
-      // Not available via HTTP client — no-op
-    },
-    restoreTask: async (_teamName: string, _taskId: string): Promise<void> => {
-      // Not available via HTTP client — no-op
-    },
-    getDeletedTasks: async (_teamName: string): Promise<TeamTask[]> => {
-      return [];
-    },
-    setTaskClarification: async (
-      _teamName: string,
-      _taskId: string,
-      _value: 'lead' | 'user' | null
-    ): Promise<void> => {
-      // Not available via HTTP client — no-op
-    },
-    showMessageNotification: async (): Promise<void> => {
-      // Not available via HTTP client — native notifications require Electron
-    },
-    addTaskRelationship: async (
-      _teamName: string,
-      _taskId: string,
-      _targetId: string,
-      _type: 'blockedBy' | 'blocks' | 'related'
-    ): Promise<void> => {
-      throw new Error('Task relationships are not available in browser mode');
-    },
-    removeTaskRelationship: async (
-      _teamName: string,
-      _taskId: string,
-      _targetId: string,
-      _type: 'blockedBy' | 'blocks' | 'related'
-    ): Promise<void> => {
-      throw new Error('Task relationships are not available in browser mode');
-    },
-    saveTaskAttachment: async (
-      _teamName: string,
-      _taskId: string,
-      _attachmentId: string,
-      _filename: string,
-      _mimeType: string,
-      _base64Data: string
-    ): Promise<never> => {
-      throw new Error('Task attachments are not available in browser mode');
-    },
-    getTaskAttachment: async (
-      _teamName: string,
-      _taskId: string,
-      _attachmentId: string,
-      _mimeType: string
-    ): Promise<string | null> => {
-      return null;
-    },
-    deleteTaskAttachment: async (
-      _teamName: string,
-      _taskId: string,
-      _attachmentId: string,
-      _mimeType: string
-    ): Promise<void> => {
-      throw new Error('Task attachments are not available in browser mode');
-    },
-    onTeamChange: (callback: (event: unknown, data: TeamChangeEvent) => void): (() => void) => {
-      return this.addEventListener('team-change', (data: unknown) =>
+    addTaskRelationship: (
+      teamName: string,
+      taskId: string,
+      targetId: string,
+      type: 'blockedBy' | 'blocks' | 'related'
+    ): Promise<void> =>
+      this.post(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/relationships`,
+        { targetId, type }
+      ),
+    removeTaskRelationship: (
+      teamName: string,
+      taskId: string,
+      targetId: string,
+      type: 'blockedBy' | 'blocks' | 'related'
+    ): Promise<void> =>
+      this.del(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/relationships/${encodeURIComponent(targetId)}`,
+        { type }
+      ),
+    saveTaskAttachment: (
+      teamName: string,
+      taskId: string,
+      attachmentId: string,
+      filename: string,
+      mimeType: string,
+      base64Data: string
+    ): Promise<TaskAttachmentMeta> =>
+      this.post<TaskAttachmentMeta>(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/attachments`,
+        { attachmentId, filename, mimeType, base64Data }
+      ),
+    getTaskAttachment: (
+      teamName: string,
+      taskId: string,
+      attachmentId: string,
+      mimeType: string
+    ): Promise<string | null> =>
+      this.get<string | null>(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachmentId)}${this.buildQuery({ mimeType })}`
+      ),
+    deleteTaskAttachment: (
+      teamName: string,
+      taskId: string,
+      attachmentId: string,
+      mimeType: string
+    ): Promise<void> =>
+      this.del(
+        `/api/teams/${encodeURIComponent(teamName)}/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachmentId)}${this.buildQuery({ mimeType })}`
+      ),
+    onTeamChange: (callback: (event: unknown, data: TeamChangeEvent) => void): (() => void) =>
+      this.addEventListener('team:change', (data: unknown) =>
         callback(null, data as TeamChangeEvent)
-      );
-    },
+      ),
     onProvisioningProgress: (
-      _callback: (event: unknown, data: TeamProvisioningProgress) => void
-    ): (() => void) => {
-      return () => {};
-    },
-    respondToToolApproval: async (): Promise<void> => {
-      throw new Error('Tool approval not available in browser mode');
-    },
-    validateCliArgs: async (): Promise<never> => {
-      throw new Error('CLI args validation not available in browser mode');
-    },
-    onToolApprovalEvent: (): (() => void) => {
-      return () => {};
-    },
-    updateToolApprovalSettings: async (): Promise<void> => {
-      console.warn('[HttpAPIClient] updateToolApprovalSettings is not available in browser mode');
-    },
-    readFileForToolApproval: async () => {
-      throw new Error('Tool approval file read not available in browser mode');
-    },
+      callback: (event: unknown, data: TeamProvisioningProgress) => void
+    ): (() => void) =>
+      this.addEventListener('team:provisioningProgress', (data: unknown) =>
+        callback(null, data as TeamProvisioningProgress)
+      ),
+    respondToToolApproval: (
+      teamName: string,
+      runId: string,
+      requestId: string,
+      allow: boolean,
+      message?: string
+    ): Promise<void> =>
+      this.post(`/api/teams/${encodeURIComponent(teamName)}/tool-approval/respond`, {
+        runId,
+        requestId,
+        allow,
+        message,
+      }),
+    validateCliArgs: (rawArgs: string): Promise<CliArgsValidationResult> =>
+      this.post<CliArgsValidationResult>('/api/teams/tool-approval/validate-cli-args', {
+        rawArgs,
+      }),
+    onToolApprovalEvent: (
+      callback: (event: unknown, data: ToolApprovalEvent) => void
+    ): (() => void) =>
+      this.addEventListener('team:toolApprovalEvent', (data: unknown) =>
+        callback(null, data as ToolApprovalEvent)
+      ),
+    updateToolApprovalSettings: (settings: ToolApprovalSettings): Promise<void> =>
+      this.patch('/api/teams/tool-approval/settings', settings),
+    readFileForToolApproval: (filePath: string): Promise<ToolApprovalFileContent> =>
+      this.post<ToolApprovalFileContent>('/api/teams/tool-approval/read-file', { filePath }),
   };
 
-  // Cross-team communication API stubs
+  // Cross-team communication API
   crossTeam: CrossTeamAPI = {
-    send: async () => {
-      throw new Error('Cross-team communication is not available in browser mode');
-    },
-    listTargets: async () => {
-      console.warn('[HttpAPIClient] crossTeam.listTargets is not available in browser mode');
-      return [];
-    },
-    getOutbox: async () => {
-      console.warn('[HttpAPIClient] crossTeam.getOutbox is not available in browser mode');
-      return [];
-    },
+    send: (request) => this.post('/api/cross-team/send', request),
+    listTargets: (excludeTeam?: string) =>
+      this.get('/api/cross-team/targets' + this.buildQuery({ excludeTeam })),
+    getOutbox: (teamName: string) =>
+      this.get(`/api/cross-team/${encodeURIComponent(teamName)}/outbox`),
   };
 
-  // Review API stubs
-  review = {
-    getAgentChanges: async (_teamName: string, _memberName: string): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    getTaskChanges: async (
-      _teamName: string,
-      _taskId: string,
-      _options?: {
+  // Review API
+  review: ElectronAPI['review'] = {
+    getAgentChanges: (teamName: string, memberName: string): Promise<any> =>
+      this.get(`/api/review/agent-changes${this.buildQuery({ teamName, memberName })}`),
+    getTaskChanges: (
+      teamName: string,
+      taskId: string,
+      options?: {
         owner?: string;
         status?: string;
         intervals?: { startedAt: string; completedAt?: string }[];
@@ -960,72 +1028,99 @@ export class HttpAPIClient implements ElectronAPI {
         summaryOnly?: boolean;
         forceFresh?: boolean;
       }
-    ): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    invalidateTaskChangeSummaries: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    getChangeStats: async (_teamName: string, _memberName: string): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    getFileContent: async (
-      _teamName: string,
-      _memberName: string | undefined,
-      _filePath: string,
-      _snippets: SnippetDiff[] = []
-    ): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    applyDecisions: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    // Phase 2 stubs
-    checkConflict: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    rejectHunks: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    rejectFile: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    previewReject: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    // Editable diff stubs
-    saveEditedFile: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    watchFiles: async (): Promise<never> => {
-      throw new Error('Review file watching is not available in browser mode');
-    },
-    unwatchFiles: async (): Promise<never> => {
-      throw new Error('Review file watching is not available in browser mode');
-    },
-    onExternalFileChange: (): (() => void) => {
-      return () => {};
-    },
-    // Decision persistence stubs
-    loadDecisions: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    saveDecisions: async (
-      _teamName: string,
-      _scopeKey: string,
-      _hunkDecisions: Record<string, unknown>,
-      _fileDecisions: Record<string, unknown>,
-      _hunkContextHashesByFile?: Record<string, Record<number, string>>
-    ): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    clearDecisions: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
-    // Phase 4 stubs
-    getGitFileLog: async (): Promise<never> => {
-      throw new Error('Review is not available in browser mode');
-    },
+    ): Promise<any> =>
+      this.get(
+        `/api/review/task-changes${this.buildQuery({
+          teamName,
+          taskId,
+          owner: options?.owner,
+          status: options?.status,
+          intervals: options?.intervals ? JSON.stringify(options.intervals) : undefined,
+          since: options?.since,
+          stateBucket: options?.stateBucket,
+          summaryOnly: options?.summaryOnly,
+          forceFresh: options?.forceFresh,
+        })}`
+      ),
+    invalidateTaskChangeSummaries: (teamName: string, taskIds: string[]): Promise<void> =>
+      this.post('/api/review/invalidate-task-change-summaries', { teamName, taskIds }),
+    getChangeStats: (teamName: string, memberName: string): Promise<any> =>
+      this.get(`/api/review/change-stats${this.buildQuery({ teamName, memberName })}`),
+    getFileContent: (
+      teamName: string,
+      memberName: string | undefined,
+      filePath: string,
+      snippets: SnippetDiff[] = []
+    ): Promise<FileChangeWithContent> =>
+      this.get<FileChangeWithContent>(
+        `/api/review/file-content${this.buildQuery({
+          teamName,
+          memberName,
+          filePath,
+          snippets: snippets.length > 0 ? JSON.stringify(snippets) : undefined,
+        })}`
+      ),
+    applyDecisions: (request: ApplyReviewRequest): Promise<ApplyReviewResult> =>
+      this.post<ApplyReviewResult>('/api/review/apply-decisions', request),
+    checkConflict: (filePath: string, expectedModified: string): Promise<any> =>
+      this.get(`/api/review/check-conflict${this.buildQuery({ filePath, expectedModified })}`),
+    rejectHunks: (
+      filePath: string,
+      original: string,
+      modified: string,
+      hunkIndices: number[],
+      snippets: SnippetDiff[]
+    ): Promise<any> =>
+      this.post('/api/review/reject-hunks', {
+        filePath,
+        original,
+        modified,
+        hunkIndices,
+        snippets,
+      }),
+    rejectFile: (filePath: string, original: string, modified: string): Promise<any> =>
+      this.post('/api/review/reject-file', { filePath, original, modified }),
+    previewReject: (
+      filePath: string,
+      original: string,
+      modified: string,
+      hunkIndices: number[],
+      snippets: SnippetDiff[]
+    ): Promise<{ preview: string; hasConflicts: boolean }> =>
+      this.post('/api/review/preview-reject', {
+        filePath,
+        original,
+        modified,
+        hunkIndices,
+        snippets,
+      }),
+    saveEditedFile: (filePath: string, content: string, projectPath?: string): Promise<any> =>
+      this.post('/api/review/save-edited-file', { filePath, content, projectPath }),
+    watchFiles: (projectPath: string, filePaths: string[]): Promise<void> =>
+      this.post('/api/review/watch-files', { projectPath, filePaths }),
+    unwatchFiles: (): Promise<void> => this.post('/api/review/unwatch-files'),
+    onExternalFileChange: (callback: (event: EditorFileChangeEvent) => void): (() => void) =>
+      this.addEventListener('review:fileChange', callback),
+    loadDecisions: (teamName: string, scopeKey: string) =>
+      this.get(`/api/review/decisions${this.buildQuery({ teamName, scopeKey })}`),
+    saveDecisions: (
+      teamName: string,
+      scopeKey: string,
+      hunkDecisions: Record<string, HunkDecision>,
+      fileDecisions: Record<string, HunkDecision>,
+      hunkContextHashesByFile?: Record<string, Record<number, string>>
+    ): Promise<void> =>
+      this.post('/api/review/decisions', {
+        teamName,
+        scopeKey,
+        hunkDecisions,
+        fileDecisions,
+        hunkContextHashesByFile,
+      }),
+    clearDecisions: (teamName: string, scopeKey: string): Promise<void> =>
+      this.del('/api/review/decisions', { teamName, scopeKey }),
+    getGitFileLog: (projectPath: string, filePath: string) =>
+      this.get(`/api/review/git-file-log${this.buildQuery({ projectPath, filePath })}`),
   };
 
   // ---------------------------------------------------------------------------
@@ -1070,70 +1165,48 @@ export class HttpAPIClient implements ElectronAPI {
   // ---------------------------------------------------------------------------
 
   project: ProjectAPI = {
-    listFiles: async () => {
-      throw new Error('Project API not available in browser mode');
-    },
+    listFiles: (projectPath: string) =>
+      this.get(`/api/project/list-files${this.buildQuery({ projectPath })}`),
   };
 
   // ---------------------------------------------------------------------------
-  // Editor (not available in browser mode)
+  // Editor
   // ---------------------------------------------------------------------------
 
   editor: EditorAPI = {
-    open: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    close: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    readDir: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    readFile: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    writeFile: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    createFile: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    createDir: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    deleteFile: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    moveFile: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    renameFile: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    searchInFiles: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    listFiles: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    readBinaryPreview: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    gitStatus: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    watchDir: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    setWatchedFiles: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    setWatchedDirs: async () => {
-      throw new Error('Editor not available in browser mode');
-    },
-    onEditorChange: () => {
-      return () => {};
-    },
+    open: (projectPath: string) => this.post('/api/editor/open', { projectPath }),
+    close: () => this.post('/api/editor/close'),
+    readDir: (dirPath: string, maxEntries?: number) =>
+      this.get(
+        `/api/editor/read-dir${this.buildQuery({
+          dirPath,
+          maxEntries,
+        })}`
+      ),
+    readFile: (filePath: string) =>
+      this.get(`/api/editor/read-file${this.buildQuery({ filePath })}`),
+    writeFile: (filePath: string, content: string, baselineMtimeMs?: number) =>
+      this.post('/api/editor/write-file', { filePath, content, baselineMtimeMs }),
+    createFile: (parentDir: string, fileName: string) =>
+      this.post('/api/editor/create-file', { parentDir, fileName }),
+    createDir: (parentDir: string, dirName: string) =>
+      this.post('/api/editor/create-dir', { parentDir, dirName }),
+    deleteFile: (filePath: string) => this.post('/api/editor/delete-file', { filePath }),
+    moveFile: (sourcePath: string, destDir: string) =>
+      this.post('/api/editor/move-file', { sourcePath, destDir }),
+    renameFile: (sourcePath: string, newName: string) =>
+      this.post('/api/editor/rename-file', { sourcePath, newName }),
+    searchInFiles: (options) => this.post('/api/editor/search-in-files', options),
+    listFiles: () => this.get('/api/editor/list-files'),
+    readBinaryPreview: (filePath: string) =>
+      this.get(`/api/editor/read-binary-preview${this.buildQuery({ filePath })}`),
+    gitStatus: () => this.get('/api/editor/git-status'),
+    watchDir: (enable: boolean) => this.post('/api/editor/watch-dir', { enable }),
+    setWatchedFiles: (filePaths: string[]) =>
+      this.post('/api/editor/set-watched-files', { filePaths }),
+    setWatchedDirs: (dirPaths: string[]) => this.post('/api/editor/set-watched-dirs', { dirPaths }),
+    onEditorChange: (callback: (event: EditorFileChangeEvent) => void) =>
+      this.addEventListener('editor:change', callback),
   };
 
   schedules = {

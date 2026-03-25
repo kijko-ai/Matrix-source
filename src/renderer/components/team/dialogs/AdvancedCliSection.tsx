@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { api } from '@renderer/api';
 import { Button } from '@renderer/components/ui/button';
 import { Checkbox } from '@renderer/components/ui/checkbox';
 import { Input } from '@renderer/components/ui/input';
@@ -145,7 +146,7 @@ export const AdvancedCliSection: React.FC<AdvancedCliSectionProps> = ({
     setValidationState('loading');
     setValidationMessage(null);
     try {
-      const result = await window.electronAPI.teams.validateCliArgs(customArgs);
+      const result = await api.teams.validateCliArgs(customArgs);
       if (result.valid) {
         setValidationState('success');
         setValidationMessage('All flags valid');

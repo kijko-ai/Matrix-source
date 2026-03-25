@@ -338,7 +338,7 @@ export const ChangeReviewDialog = ({
   }, []);
 
   useEffect(() => {
-    if (!open || !projectPath || !isElectronMode()) return;
+    if (!open || !projectPath) return;
 
     const unsubscribe = api.review.onExternalFileChange((event) => {
       const normalizedPath = normalizePathForComparison(event.path);
@@ -1097,22 +1097,30 @@ export const ChangeReviewDialog = ({
     scheduleScrollToFile,
   ]);
 
-  // Cmd+N IPC listener (forwarded from main process)
+  // Cmd+N / Ctrl+N: reject the current hunk in the active editor and move to the next one.
   useEffect(() => {
     if (!open) return;
-    const cleanup = window.electronAPI?.review.onCmdN?.(() => {
+    const handler = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || e.code !== 'KeyN' || e.shiftKey || e.altKey) return;
+
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
       const fp = activeFilePathRef.current;
       if (!fp) return;
       const view = editorViewMapRef.current.get(fp);
       if (!view) return;
 
+      e.preventDefault();
+      e.stopPropagation();
       const cursorPos = view.state.selection.main.head;
       const idx = computeChunkIndexAtPos(view.state, cursorPos);
       handleHunkRejected(fp, idx);
       rejectChunk(view);
       requestAnimationFrame(() => diffNav.goToNextHunk());
-    });
-    return cleanup ?? undefined;
+    };
+    document.addEventListener('keydown', handler, true);
+    return () => document.removeEventListener('keydown', handler, true);
   }, [open, diffNav, handleHunkRejected]);
 
   // Compute toolbar stats using actual CM chunk count (not snippet count)

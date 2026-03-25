@@ -691,6 +691,14 @@ export function isTeamProvisioningActive(
   return current != null && ACTIVE_PROVISIONING_STATES.has(current.state);
 }
 
+function isProvisioningTeamNotFoundMessage(message: string, teamName: string): boolean {
+  return (
+    message === 'Team not found' ||
+    message === `Team not found: ${teamName}` ||
+    message.includes(`Team not found: ${teamName}`)
+  );
+}
+
 function loadAllLaunchParams(): Record<string, TeamLaunchParams> {
   const result: Record<string, TeamLaunchParams> = {};
   try {
@@ -1230,7 +1238,11 @@ export const createTeamSlice: StateCreator<AppState, [], [], TeamSlice> = (set, 
 
       const msg = error instanceof Error ? error.message : String(error);
       // IPC can report provisioning state explicitly.
-      if (msg === 'TEAM_PROVISIONING' || (msg.includes('TEAM_PROVISIONING') && isProvisioning)) {
+      if (
+        msg === 'TEAM_PROVISIONING' ||
+        (msg.includes('TEAM_PROVISIONING') && isProvisioning) ||
+        (isProvisioning && isProvisioningTeamNotFoundMessage(msg, teamName))
+      ) {
         set({
           selectedTeamLoading: true,
           selectedTeamData: null,
@@ -1311,7 +1323,12 @@ export const createTeamSlice: StateCreator<AppState, [], [], TeamSlice> = (set, 
 
       // During provisioning, team:getData may not be readable yet.
       // Preserve existing data instead of showing a fatal error.
-      if (msg === 'TEAM_PROVISIONING' || msg.includes('TEAM_PROVISIONING')) {
+      if (
+        msg === 'TEAM_PROVISIONING' ||
+        msg.includes('TEAM_PROVISIONING') ||
+        (isTeamProvisioningActive(get(), teamName) &&
+          isProvisioningTeamNotFoundMessage(msg, teamName))
+      ) {
         logger.debug(`refreshTeamData(${teamName}) skipped: team is still provisioning`);
         set({ selectedTeamError: null });
         return;
