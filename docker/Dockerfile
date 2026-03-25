@@ -26,7 +26,7 @@ RUN pnpm install --frozen-lockfile
 
 # Copy source and build
 COPY . .
-RUN pnpm standalone:build
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm standalone:build
 
 # =============================================================================
 # Production stage — minimal image with only the built output
