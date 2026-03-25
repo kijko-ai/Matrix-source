@@ -37,7 +37,7 @@ jobs:
       - name: Compute image names
         id: meta
         run: |
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/matrix"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/matrix-deploy"
           SHA_TAG="${IMAGE}:${GITHUB_SHA}"
           MAIN_TAG="${IMAGE}:main"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"

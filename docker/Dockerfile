@@ -35,6 +35,9 @@ FROM node:20-slim
 
 WORKDIR /app
 
+LABEL org.opencontainers.image.source="https://github.com/kijko-ai/Matrix"
+LABEL org.opencontainers.image.description="Standalone Matrix deployment image for docs.kijko.nl"
+
 # Enable corepack for pnpm
 RUN corepack enable
 
